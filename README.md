@@ -228,7 +228,17 @@ Here GUPS and STREAM workloads are tested which are in the folder:
 
 - `traces/stream/`
 - `traces/gups/`
+## Workload Generation
 
+The workloads used in this project were derived from the following benchmark suites:
+
+STREAM (memory bandwidth benchmark):
+https://github.com/jeffhammond/STREAM
+
+GUPS (Random memory access benchmark):
+https://github.com/alexandermerritt/gups
+
+These benchmarks were used to generate memory access traces which were then used as inputs for the DRAMsim3 simulations. 
 ```bash
 DRAMsim3/
 │
@@ -257,7 +267,7 @@ The configuration includes several knobs that control the optimizations:
 - `threshold` – parameter used in CA-1 decision logic
 
 ## instructions to run the code
-
+example for HBM2( the modified config)
 ```bash
 ./build/dramsim3main \
 ~/configs/HBM2_8Gb_x128_powerfix1.ini \
@@ -287,3 +297,8 @@ END{
   if(sum_reads>0)printf("SYSTEM_weighted_avg_read_latency = %.4f cycles\n", wlat/sum_reads);
 }' <out_dir>/dramsim3.txt
 ```
+## Example Output
+
+After running the simulator, the output statistics should appear as shown below:
+
+![Example Output](images/example.png)
