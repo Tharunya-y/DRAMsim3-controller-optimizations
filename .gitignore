@@ -46,3 +46,8 @@ release
 
 # IDEs / Editors
 .vscode/
+
+# Large trace files
+traces/stream/stream_1s.inj4.trace
+traces/stream/stream_1s.dramsim3.trace
+traces/stream/stream_1s_2x_footprint.dramsim3.trace

@@ -67,6 +67,11 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     bool WillAcceptTransaction(uint64_t hex_addr, bool is_write) const override;
     bool AddTransaction(uint64_t hex_addr, bool is_write) override;
     void ClockTick() override;
+       private:
+    // CA-1: pick channel using adaptive remapping (may modify addr_inout)
+    int PickChannelCA1(uint64_t &addr_inout, bool is_write) const;
+    // CA-2
+    int PickChannelCA2(uint64_t &addr_inout, bool is_write) const;
 };
 
 // Model a memorysystem with an infinite bandwidth and a fixed latency (possibly

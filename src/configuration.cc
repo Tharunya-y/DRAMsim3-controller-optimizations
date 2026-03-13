@@ -243,7 +243,16 @@ void Config::InitSystemParams() {
     sref_threshold = GetInteger("system", "sref_threshold", 1000);
     aggressive_precharging_enabled =
         reader.GetBoolean("system", "aggressive_precharging_enabled", false);
+// CA-1: Channel-aware scheduling parameters
+ca1_enable = reader.GetBoolean("system", "ca1_enable", false);
+ca1_imbalance_thresh = GetInteger("system", "ca1_imbalance_thresh", 16);
 
+std::string mask_str = reader.Get("system", "ca1_xor_mask", "0x0");
+ca1_xor_mask = std::stoull(mask_str, nullptr, 0);
+//ca-2 
+ca2_enable = reader.GetBoolean("system", "ca2_enable", false);
+ca2_delta  = GetInteger("system", "ca2_delta", 2);
+ca2_k      = GetInteger("system", "ca2_k", 3);
     return;
 }
 

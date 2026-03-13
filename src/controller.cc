@@ -157,7 +157,15 @@ bool Controller::WillAcceptTransaction(uint64_t hex_addr, bool is_write) const {
         return write_buffer_.size() < write_buffer_.capacity();
     }
 }
+size_t Controller::PendingTransCount(bool is_write) const {
+    if (is_unified_queue_) return unified_queue_.size();
+    return is_write ? write_buffer_.size() : read_queue_.size();
+}
 
+size_t Controller::PendingTotalCount() const {
+    if (is_unified_queue_) return unified_queue_.size();
+    return read_queue_.size() + write_buffer_.size();
+}
 bool Controller::AddTransaction(Transaction trans) {
     trans.added_cycle = clk_;
     simple_stats_.AddValue("interarrival_latency", clk_ - last_trans_clk_);
@@ -196,36 +204,118 @@ bool Controller::AddTransaction(Transaction trans) {
 
 void Controller::ScheduleTransaction() {
     // determine whether to schedule read or write
-    if (write_draining_ == 0 && !is_unified_queue_) {
-        // we basically have a upper and lower threshold for write buffer
-        if ((write_buffer_.size() >= write_buffer_.capacity()) ||
-            (write_buffer_.size() > 8 && cmd_queue_.QueueEmpty())) {
-            write_draining_ = write_buffer_.size();
+    if (!is_unified_queue_) {
+        const size_t WR_CAP  = write_buffer_.capacity();
+        const size_t WR_HIGH = std::max<size_t>(8, (WR_CAP * 3) / 4);
+        const size_t WR_LOW  = std::max<size_t>(4, (WR_CAP * 1) / 4);
+        const size_t RD_HIGH = 16;
+
+        const size_t wr = write_buffer_.size();
+        const size_t rd = read_queue_.size();
+
+        // If currently draining writes, stop early if reads become urgent
+        if (write_draining_ > 0) {
+            if (rd >= RD_HIGH && wr <= WR_HIGH) {
+                write_draining_ = 0;
+            }
+        }
+
+        // If not draining, start only when writes are high and reads are not urgent
+        if (write_draining_ == 0) {
+            if (wr >= WR_CAP) {
+                write_draining_ = wr;
+            } else if (wr >= WR_HIGH && rd < RD_HIGH) {
+                write_draining_ = wr;
+            } else if (wr > 8 && cmd_queue_.QueueEmpty() && rd == 0) {
+                write_draining_ = wr;
+            }
+        }
+
+        // If draining and writes have dropped low enough, stop draining
+        if (write_draining_ > 0 && wr <= WR_LOW) {
+            write_draining_ = 0;
         }
     }
 
     std::vector<Transaction> &queue =
         is_unified_queue_ ? unified_queue_
                           : write_draining_ > 0 ? write_buffer_ : read_queue_;
-    for (auto it = queue.begin(); it != queue.end(); it++) {
+
+    const size_t READ_THRESHOLD = 8;
+
+    auto best_it = queue.end();
+    int best_score = -1000000;
+    int eligible_count = 0;
+
+    for (auto it = queue.begin(); it != queue.end(); ++it) {
         auto cmd = TransToCommand(*it);
-        if (cmd_queue_.WillAcceptCommand(cmd.Rank(), cmd.Bankgroup(),
-                                         cmd.Bank())) {
-            if (!is_unified_queue_ && cmd.IsWrite()) {
-                // Enforce R->W dependency
-                if (pending_rd_q_.count(it->addr) > 0) {
-                    write_draining_ = 0;
-                    break;
+
+        if (!cmd_queue_.WillAcceptCommand(cmd.Rank(), cmd.Bankgroup(), cmd.Bank()))
+            continue;
+
+        eligible_count++;
+
+        int score = 0;
+
+        // Only optimize reads in read phase
+        if (!is_unified_queue_ && write_draining_ == 0 && !cmd.IsWrite()) {
+            bool row_hit =
+                (channel_state_.RowHitCount(cmd.Rank(), cmd.Bankgroup(), cmd.Bank()) != 0);
+
+            bool bandwidth_critical =
+                (eligible_count >= 2 && read_queue_.size() >= READ_THRESHOLD);
+
+            if (bandwidth_critical) {
+                // Bandwidth mode: prefer bank-group interleaving
+                if (row_hit)
+                    score += 6;
+
+                if (have_last_col_ && cmd.Rank() == last_col_rank_) {
+                    if (cmd.Bankgroup() != last_col_bg_) {
+                        score += 12;   // strong bonus for different BG
+                    } else if (cmd.Bank() == last_col_bank_) {
+                        score -= 4;    // penalty for same bank
+                    } else {
+                        score -= 1;    // mild penalty for same BG
+                    }
                 }
-                write_draining_ -= 1;
+            } else {
+                // Latency mode: preserve row hits first
+                if (row_hit)
+                    score += 10;
+
+                if (have_last_col_ && cmd.Rank() == last_col_rank_) {
+                    if (cmd.Bankgroup() != last_col_bg_) {
+                        score += 3;
+                    } else if (cmd.Bank() == last_col_bank_) {
+                        score -= 2;
+                    }
+                }
             }
-            cmd_queue_.AddCommand(cmd);
-            queue.erase(it);
-            break;
+        }
+
+        // keep first best (stable)
+        if (score > best_score) {
+            best_score = score;
+            best_it = it;
         }
     }
-}
 
+    if (best_it != queue.end()) {
+        auto cmd = TransToCommand(*best_it);
+
+        if (!is_unified_queue_ && cmd.IsWrite()) {
+            if (pending_rd_q_.count(best_it->addr) > 0) {
+                write_draining_ = 0;
+                return;
+            }
+            write_draining_ -= 1;
+        }
+
+        cmd_queue_.AddCommand(cmd);
+        queue.erase(best_it);
+    }
+}
 void Controller::IssueCommand(const Command &cmd) {
 #ifdef CMD_TRACE
     cmd_trace_ << std::left << std::setw(18) << clk_ << " " << cmd << std::endl;
@@ -234,6 +324,13 @@ void Controller::IssueCommand(const Command &cmd) {
     // add channel in, only needed by thermal module
     thermal_calc_.UpdateCMDPower(channel_id_, cmd, clk_);
 #endif  // THERMAL
+	// Phase 2: remember last issued column command location
+    if (cmd.IsRead() || cmd.IsWrite()) {
+        last_col_rank_ = cmd.Rank();
+        last_col_bg_ = cmd.Bankgroup();
+        last_col_bank_ = cmd.Bank();
+        have_last_col_ = true;
+    }
     // if read/write, update pending queue and return queue
     if (cmd.IsRead()) {
         auto num_reads = pending_rd_q_.count(cmd.hex_addr);

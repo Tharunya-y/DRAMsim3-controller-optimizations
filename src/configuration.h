@@ -133,7 +133,14 @@ class Config {
     int sref_threshold;
     bool aggressive_precharging_enabled;
     bool enable_hbm_dual_cmd;
-
+    // CA-1: channel-aware adaptive remapping
+bool ca1_enable = false;
+int ca1_imbalance_thresh = 16;
+uint64_t ca1_xor_mask = 0x0;
+// CA-2: multi-candidate channel-aware routing
+bool ca2_enable = false;
+int  ca2_delta = 2;     
+int  ca2_k = 3;         
 
     int epoch_period;
     int output_level;

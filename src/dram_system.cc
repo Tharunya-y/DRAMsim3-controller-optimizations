@@ -1,5 +1,5 @@
 #include "dram_system.h"
-
+#include <limits>
 #include <assert.h>
 
 namespace dramsim3 {
@@ -118,26 +118,120 @@ JedecDRAMSystem::~JedecDRAMSystem() {
         delete (*it);
     }
 }
+//CA-1 CODE HERE
+int JedecDRAMSystem::PickChannelCA1(uint64_t &addr_inout, bool is_write) const {
+    int base_ch = GetChannel(addr_inout);
 
+    // off / trivial cases
+    if (!config_.ca1_enable || config_.channels <= 1 || config_.ca1_xor_mask == 0) {
+        return base_ch;
+    }
+
+    // Compute queue imbalance (use total queue so it works for mixed R/W)
+    size_t min_q = std::numeric_limits<size_t>::max();
+    size_t max_q = 0;
+    for (int ch = 0; ch < config_.channels; ch++) {
+        size_t q = ctrls_[ch]->PendingTotalCount();
+        min_q = std::min(min_q, q);
+        max_q = std::max(max_q, q);
+    }
+
+    if ((int)(max_q - min_q) < config_.ca1_imbalance_thresh) {
+        return base_ch;
+    }
+
+    // Candidate remap (simple XOR hashing)
+    uint64_t alt_addr = addr_inout ^ config_.ca1_xor_mask;
+    int alt_ch = GetChannel(alt_addr);
+
+    if (alt_ch == base_ch) return base_ch;
+
+    size_t q_base = ctrls_[base_ch]->PendingTotalCount();
+    size_t q_alt  = ctrls_[alt_ch]->PendingTotalCount();
+
+    // Switch only if it meaningfully reduces load (prevents oscillation)
+    if (q_alt + 1 < q_base) {
+        addr_inout = alt_addr;   // IMPORTANT: keep address consistent downstream
+        return alt_ch;
+    }
+
+
+    return base_ch;
+}
+//CA-2 CODE HERE
+int JedecDRAMSystem::PickChannelCA2(uint64_t &addr_inout, bool is_write) const {
+    int base_ch = GetChannel(addr_inout);
+
+    // off / trivial cases
+    if (!config_.ca2_enable || config_.channels <= 1) {
+        return PickChannelCA1(addr_inout, is_write);  // fall back to CA1
+    }
+
+    // Compute queue imbalance first (same idea as CA1)
+    size_t min_q = std::numeric_limits<size_t>::max();
+    size_t max_q = 0;
+    for (int ch = 0; ch < config_.channels; ch++) {
+        size_t q = ctrls_[ch]->PendingTotalCount();
+        min_q = std::min(min_q, q);
+        max_q = std::max(max_q, q);
+    }
+
+    // Reuse CA1 threshold (so behavior stays conservative)
+    if (!config_.ca1_enable || config_.ca1_xor_mask == 0 ||
+        (int)(max_q - min_q) < config_.ca1_imbalance_thresh) {
+        return base_ch;
+    }
+
+    // CA2: try multiple XOR masks and choose the least-loaded channel
+    // Hardcode a small set that you already tested (good for report reproducibility)
+    static const uint64_t masks_all[] = {0x800, 0x1000, 0x2000, 0x4000};
+
+    int best_ch = base_ch;
+    uint64_t best_addr = addr_inout;
+    size_t best_q = ctrls_[base_ch]->PendingTotalCount();
+
+    int k = std::max(1, std::min(config_.ca2_k, (int)(sizeof(masks_all)/sizeof(masks_all[0]))));
+
+    for (int i = 0; i < k; i++) {
+        uint64_t m = masks_all[i];
+        uint64_t cand_addr = addr_inout ^ m;
+        int cand_ch = GetChannel(cand_addr);
+        if (cand_ch == base_ch) continue;
+
+        size_t cand_q = ctrls_[cand_ch]->PendingTotalCount();
+
+        // Switch only if candidate is meaningfully better (hysteresis)
+        if (cand_q + (size_t)config_.ca2_delta < best_q) {
+            best_q = cand_q;
+            best_ch = cand_ch;
+            best_addr = cand_addr;
+        }
+    }
+
+    if (best_ch != base_ch) {
+        addr_inout = best_addr;   // keep downstream consistent
+    }
+    return best_ch;
+}
 bool JedecDRAMSystem::WillAcceptTransaction(uint64_t hex_addr,
                                             bool is_write) const {
-    int channel = GetChannel(hex_addr);
-    return ctrls_[channel]->WillAcceptTransaction(hex_addr, is_write);
+    uint64_t addr = hex_addr;
+    int channel = PickChannelCA2(addr, is_write);
+    return ctrls_[channel]->WillAcceptTransaction(addr, is_write);
 }
-
 bool JedecDRAMSystem::AddTransaction(uint64_t hex_addr, bool is_write) {
-// Record trace - Record address trace for debugging or other purposes
 #ifdef ADDR_TRACE
     address_trace_ << std::hex << hex_addr << std::dec << " "
                    << (is_write ? "WRITE " : "READ ") << clk_ << std::endl;
 #endif
 
-    int channel = GetChannel(hex_addr);
-    bool ok = ctrls_[channel]->WillAcceptTransaction(hex_addr, is_write);
+    uint64_t addr = hex_addr;
+    int channel = PickChannelCA1(addr, is_write);
 
+    bool ok = ctrls_[channel]->WillAcceptTransaction(addr, is_write);
     assert(ok);
     if (ok) {
-        Transaction trans = Transaction(hex_addr, is_write);
+        Transaction trans = Transaction(addr, is_write);  // USE remapped addr
         ctrls_[channel]->AddTransaction(trans);
     }
     last_req_clk_ = clk_;

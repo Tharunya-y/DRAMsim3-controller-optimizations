@@ -156,3 +156,134 @@ other Verilog simulators may require a slightly different format.
 
 [6] Li, S. (2019). Scalable and Accurate Memory System Simulation (Doctoral dissertation).
 
+##  Project Modifications (CA-1 and Phase-2 Controller Optimizations)
+
+This repository contains additional modifications implemented on top of the original DRAMsim3 simulator.  
+The purpose of these modifications is to evaluate memory controller behavior and improve performance for specific workloads using two optimizations:
+
+• **CA-1 (Channel Addressing Optimization)**  
+• **Phase-2 Controller Scheduling Optimization**
+
+These optimizations were evaluated using **HBM2 configurations** and memory traces such as **STREAM** and **GUPS**.
+
+---
+
+## Modified Source Files
+
+The CA-1 implementation modifies several core DRAMsim3 files located in `src/`.
+
+Modified files:
+src/controller.cc
+src/controller.h
+src/configuration.cc
+src/configuration.h
+src/dram_system.cc
+src/dram_system.h
+
+
+These files implement the CA-1 logic including:
+
+- Channel selection logic
+- Address remapping behavior
+- Configuration parameters required for the optimization
+- Controller behavior updates
+
+---
+
+
+
+
+If users want to test the **default DRAMsim3 behavior**, they can replace the modified files with these `.ORIGINAL` versions.
+
+---
+
+The complete combined implementation of **CA-1 + Phase-2 scheduling optimization** is stored in the following files:
+
+- `src/controller.cc`
+- `src/Pcontroller.h`
+
+
+These files contain the full controller implementation used for the final optimized experiments.
+
+
+Phase-2 improves command scheduling by modifying how commands are selected and issued within the memory controller.
+
+---
+
+## Modified Configuration File
+
+The configuration used for the experiments is:
+```bash
+configs/HBM2_8Gb_x12_powerfix1.ini
+```
+The configuration includes several knobs that control the optimizations:
+
+- `CA1_enable` – enables or disables CA-1 optimization  
+- `phase2_enable` – enables or disables Phase-2 scheduling  
+- `XOR_mask` – controls address remapping for channel distribution  
+- `threshold` – parameter used in CA-1 decision logic
+
+##  Trace file
+Here GUPS and STREAM workloads are tested which are in the folder:
+
+- `traces/stream/`
+- `traces/gups/`
+
+```bash
+DRAMsim3/
+│
+├── src/
+│ ├── controller.cc
+│ ├── controller.h
+│
+├── configs/
+│ └── HBM2_8Gb_x128_powerfix1.ini
+│
+├── traces/
+│ ├── stream/stream_1s.dramsim3.trace
+│ └── gups/gups.dramsim3.strict_full_dealias.trace
+│
+├── build/
+└── README.md
+```
+
+## Modified Configuration File
+
+The configuration includes several knobs that control the optimizations:
+
+- `CA1_enable` – enables or disables CA-1 optimization  
+- `phase2_enable` – enables or disables Phase-2 scheduling  
+- `XOR_mask` – controls address remapping for channel distribution  
+- `threshold` – parameter used in CA-1 decision logic
+
+## instructions to run the code
+
+```bash
+./build/dramsim3main \
+~/configs/HBM2_8Gb_x128_powerfix1.ini \
+-t ~/traces/stream/stream_1s.dramsim3.trace \
+-o <out_dir>
+```
+## instructions to see the required parameter 
+```bash
+ awk '
+/^## Statistics of Channel/ {ch=$5}
+/^num_cycles/ {cycles=$3}
+/^average_bandwidth/ {bw[ch]=$3}
+/^total_energy/ {en[ch]=$3}
+/^average_read_latency/ {lat[ch]=$3}
+/^num_reads_done/ {reads[ch]=$3}
+END{
+  sum_bw=0; sum_en=0; sum_reads=0; wlat=0;
+  for(c in bw) sum_bw += bw[c];
+  for(c in en) sum_en += en[c];
+  for(c in reads){ sum_reads += reads[c]; wlat += reads[c]*lat[c]; }
+
+  printf("SYSTEM_total_bandwidth = %.4f\n", sum_bw);
+  printf("SYSTEM_total_energy_pJ = %.6e\n", sum_en);
+  if(cycles>0)   printf("SYSTEM_avg_power_pJ_per_cycle = %.6e\n", sum_en/cycles);
+  if(sum_reads>0)printf("SYSTEM_energy_per_read_pJ = %.6f\n", sum_en/sum_reads);
+  if(sum_bw>0)   printf("SYSTEM_energy_per_BWunit_pJ = %.6e\n", sum_en/sum_bw);
+  if(sum_reads>0)printf("SYSTEM_weighted_avg_read_latency = %.4f cycles\n", wlat/sum_reads);
+}' <out_dir>/dramsim3.txt
+```
